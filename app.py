@@ -155,6 +155,14 @@ else:
         st.info("🕒 **1st Innings in progress.** Win prediction will activate once the run chase begins.")
 
 # --- 6. The Refresh Loop ---
-st.caption(f"Last updated: {time.strftime('%H:%M:%S')}")
+import pytz
+from datetime import datetime
+
+# --- 6. The Refresh Loop ---
+# Set timezone to IST
+IST = pytz.timezone('Asia/Kolkata')
+current_time = datetime.now(IST).strftime('%H:%M:%S')
+
+st.caption(f"🔴 Live Polling Active... Last checked at {current_time} (IST)")
 time.sleep(15)
 st.rerun()
