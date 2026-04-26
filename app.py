@@ -1,39 +1,64 @@
 import streamlit as st
+import requests
+import time
+import pytz
 import pandas as pd
 import joblib
-import time
-import requests
-import streamlit as st
+from datetime import datetime
 
-# --- 1. Page Configuration ---
-st.set_page_config(page_title="IPL Live Analytics", page_icon="🏏", layout="wide")
-st.title("🏏 IPL Live Match Center")
-
-# --- 2. Load the ML Model ---
-@st.cache_resource
-def load_model():
-    return joblib.load('ipl_xgboost_model.pkl')
-
-model = load_model()
-
-# --- 3. API Configuration ---
+# --- 1. CONFIGURATION & SETUP ---
+# Securely fetch the API key from Streamlit Secrets
 API_KEY = st.secrets["CRIC_API_KEY"]
+IST = pytz.timezone('Asia/Kolkata')
+MODEL_PATH = "ipl_xgboost_model.pkl"
 
-@st.cache_data(ttl=300)
-def get_active_ipl_match_id():
+# Configure the page layout
+st.set_page_config(page_title="IPL Live Win Predictor", page_icon="🏏", layout="centered")
+
+# --- 2. SMART SCHEDULER ---
+def get_current_match_window():
+    """Determines if a match is likely live based on IST time and day of week."""
+    now = datetime.now(IST)
+    weekday = now.weekday() # 0 = Monday, 6 = Sunday
+    time_float = now.hour + now.minute / 60.0
+    
+    # Weekdays (Mon-Fri): Only evening games at 7:30 PM (19.5)
+    if weekday < 5:
+        return "evening" if time_float >= 19.5 else "off_hours"
+    # Weekends (Sat-Sun): Afternoon games at 3:30 PM (15.5) and Evening games at 7:30 PM
+    else:
+        if 15.5 <= time_float < 19.5: 
+            return "afternoon"
+        elif time_float >= 19.5: 
+            return "evening"
+            
+    return "off_hours"
+
+# --- 3. CACHED MATCH ID FETCHER ---
+# This runs only ONCE every 4 hours, saving massive API hits.
+@st.cache_data(ttl=14400) 
+def get_active_ipl_match_id(window_type):
+    if window_type == "off_hours":
+        return None
+    
     url = f"https://api.cricapi.com/v1/currentMatches?apikey={API_KEY}&offset=0"
     try:
         response = requests.get(url)
         match_list = response.json().get('data', [])
         for match in match_list:
-            if "ipl" in match.get('name', '').lower() or "indian premier league" in match.get('series', '').lower():
+            name = match.get('name', '').lower()
+            series = match.get('series', '').lower()
+            if "ipl" in name or "indian premier league" in series:
+                # Ensure the match hasn't already concluded
                 if "match ended" not in match.get('status', '').lower():
                     return match.get('id')
         return None
     except:
         return None
 
-def fetch_live_data(match_id):
+# --- 4. DATA FETCHING LOGIC ---
+def fetch_match_data(match_id):
+    """Fetches the detailed live score for the active match ID."""
     url = f"https://api.cricapi.com/v1/match_info?apikey={API_KEY}&id={match_id}"
     try:
         response = requests.get(url)
@@ -41,128 +66,118 @@ def fetch_live_data(match_id):
     except:
         return {}
 
-# --- 4. The UI Components ---
+# --- 5. MAIN DASHBOARD UI ---
+st.title("🏏 IPL Live Win Predictor")
 
-def display_scoreboard(match_data):
-    """Displays a Google-style match summary card."""
-    st.subheader(f"🏟️ {match_data.get('name', 'IPL Match')}")
-    st.caption(f"📍 {match_data.get('venue', 'Loading venue...')}")
-    
-    score_list = match_data.get('score', [])
-    teams = match_data.get('teams', ["Team A", "Team B"])
-    
-    # Create the 'Google Card' layout
-    with st.container(border=True):
-        col1, col2, col3 = st.columns([2, 1, 2])
-        
-        # Team 1 (Home)
-        with col1:
-            st.write(f"### {teams[0]}")
-            if len(score_list) > 0:
-                s1 = score_list[0]
-                st.title(f"{s1['r']}/{s1['w']}")
-                st.write(f"({s1['o']} overs)")
-        
-        with col2:
-            st.write("## VS")
-            st.write(f"**{match_data.get('status', 'Live')}**")
-
-        # Team 2 (Away)
-        with col3:
-            st.write(f"### {teams[1]}")
-            if len(score_list) > 1:
-                s2 = score_list[1]
-                st.title(f"{s2['r']}/{s2['w']}")
-                st.write(f"({s2['o']} overs)")
-            else:
-                st.title("Yet to Bat")
-
-def translate_features(match_data):
-    """Translates API JSON to XGBoost features for the 2nd Innings."""
-    score_list = match_data.get('score', [])
-    if len(score_list) < 2:
-        return None 
-        
-    venue = match_data.get('venue', 'Unknown Venue')
-    season = match_data.get('date', '2026').split('-')[0]
-    is_impact_era = 1 if int(season) >= 2023 else 0
-
-    first_innings = score_list[0]
-    second_innings = score_list[1]
-    
-    target_score = first_innings.get('r', 0) + 1
-    current_score = second_innings.get('r', 0)
-    wickets_lost = second_innings.get('w', 0)
-    overs_bowled = second_innings.get('o', 0.0)
-    
-    completed_overs = int(overs_bowled)
-    balls_in_current_over = int(round((overs_bowled - completed_overs) * 10))
-    balls_bowled = (completed_overs * 6) + balls_in_current_over
-    
-    balls_remaining = max(0, 120 - balls_bowled)
-    runs_required = target_score - current_score
-    
-    crr = (current_score * 6) / balls_bowled if balls_bowled > 0 else 0.0
-    rrr = (runs_required * 6) / balls_remaining if balls_remaining > 0 else 0.0
-    
-    return {
-        'venue': venue, 'season': season, 'is_impact_era': is_impact_era,
-        'target_score': target_score, 'current_score': current_score,
-        'runs_required': runs_required, 'wickets_lost': wickets_lost,
-        'balls_remaining': balls_remaining, 'cumulative_dots': int(completed_overs * 3),
-        'crr': crr, 'rrr': rrr, 'run_rate_diff': crr - rrr
-    }
-
-# --- 5. Main Application Flow ---
-
-match_id = get_active_ipl_match_id()
+window = get_current_match_window()
+match_id = get_active_ipl_match_id(window)
 
 if not match_id:
-    st.info("🔎 Scanning for live IPL matches...")
-    st.warning("No live matches found. The dashboard will update automatically when a game begins.")
+    # What to show when no game is on
+    st.info("🌙 No live matches scheduled right now. The tracker will auto-wake during match hours.")
+    st.caption(f"Last checked: {datetime.now(IST).strftime('%I:%M %p')} IST")
+    
+    # Sleep for 10 minutes during off-hours to preserve credits
+    time.sleep(600) 
+    st.rerun()
+
 else:
-    # A. Fetch and Display Scoreboard (Always visible)
-    live_data = fetch_live_data(match_id)
-    display_scoreboard(live_data)
+    # What to do when a match IS live
+    match_data = fetch_match_data(match_id)
     
-    # B. If 2nd Innings has started, show Predictions
-    features = translate_features(live_data)
-    
-    if features:
-        st.divider()
-        st.markdown("### 🤖 ML Win Prediction")
+    if match_data:
+        match_name = match_data.get('name', 'Live Match')
+        status = match_data.get('status', 'Status unavailable')
+        score_list = match_data.get('score', [])
         
-        # Prediction Logic
-        df = pd.DataFrame([features])
-        df['venue'] = df['venue'].astype('category')
-        df['season'] = df['season'].astype('category')
-        win_prob = model.predict_proba(df)[0][1] * 100
+        st.subheader(match_name)
+        st.write(f"**Live Status:** {status}")
         
-        # Display Prediction Cards
-        p_col1, p_col2 = st.columns([1, 2])
-        with p_col1:
-            st.metric(label="Chasing Team Win %", value=f"{win_prob:.1f}%")
-        with p_col2:
-            st.progress(int(win_prob) / 100.0, text=f"Win Probability: {int(win_prob)}%")
+        # Logic to determine match phase based on innings
+        if len(score_list) == 0:
+            st.warning("Match is about to start. Waiting for the first ball...")
             
-        # Advanced Metrics Row
-        m_col1, m_col2, m_col3 = st.columns(3)
-        m_col1.metric("Required RR", f"{features['rrr']:.2f}")
-        m_col2.metric("Current RR", f"{features['crr']:.2f}")
-        m_col3.metric("Runs Needed", f"{features['runs_required']}")
-    else:
-        st.divider()
-        st.info("🕒 **1st Innings in progress.** Win prediction will activate once the run chase begins.")
+        elif len(score_list) == 1:
+            st.info("1st Innings in progress. Win probability will activate during the chase.")
+            score_1 = score_list[0]
+            st.metric(label="Batting First", value=f"{score_1.get('r')}/{score_1.get('w')} ({score_1.get('o')} overs)")
+            
+        elif len(score_list) >= 2:
+            st.success("2nd Innings in progress! Live predictions active.")
+            
+            score_1 = score_list[0]
+            score_2 = score_list[1]
+            
+            # Feature Extraction
+            target_score = score_1.get('r') + 1
+            current_score = score_2.get('r')
+            wickets_lost = score_2.get('w')
+            overs_bowled = score_2.get('o')
+            
+            runs_required = target_score - current_score
+            
+            # Convert decimal overs (e.g., 14.3) to balls bowled
+            completed_overs = int(overs_bowled)
+            extra_balls = int(round((overs_bowled - completed_overs) * 10))
+            balls_bowled = (completed_overs * 6) + extra_balls
+            balls_remaining = 120 - balls_bowled
+            
+            crr = current_score / (balls_bowled / 6) if balls_bowled > 0 else 0
+            rrr = (runs_required / balls_remaining) * 6 if balls_remaining > 0 else 0
+            run_rate_diff = crr - rrr 
+            
+            # Display Live Metrics
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Target", target_score)
+            col2.metric("Current Score", f"{current_score}/{wickets_lost}")
+            col3.metric("Required", f"{runs_required} off {balls_remaining} balls")
+            
+            # --- 6. MODEL PREDICTION ---
+# --- 6. MODEL PREDICTION ---
+        try:
+            model = joblib.load(MODEL_PATH)
+            
+            # 1. Create the DataFrame with the exact variables
+            input_dict = {
+                'venue': [1],                # Placeholder: Update with actual encoded ID if possible
+                'season': [2026],            # Current season
+                'is_impact_era': [1],        # 1 = True (Impact player era)
+                'target_score': [target_score],
+                'current_score': [current_score],
+                'runs_required': [runs_required],
+                'wickets_lost': [wickets_lost],
+                'balls_remaining': [balls_remaining],
+                'cumulative_dots': [0],      # Placeholder: API rarely gives live dot balls easily
+                'crr': [crr],
+                'rrr': [rrr],
+                'run_rate_diff': [run_rate_diff]
+            }
+            
+            input_features = pd.DataFrame(input_dict)
+            
+            # 2. Force the exact column order your model expects
+            expected_order = [
+                'venue', 'season', 'is_impact_era', 'target_score', 'current_score', 
+                'runs_required', 'wickets_lost', 'balls_remaining', 'cumulative_dots', 
+                'crr', 'rrr', 'run_rate_diff'
+            ]
+            input_features = input_features[expected_order]
+            
+            # 3. Predict Probability
+            win_prob = model.predict_proba(input_features)[0][1] * 100
+            
+            # Display Progress Bar and Percentage
+            st.markdown(f"### Chasing Team Win Probability: **{win_prob:.1f}%**")
+            st.progress(int(win_prob))
+            
+        except Exception as e:
+            st.error(f"Prediction Error: {e}")
 
-# --- 6. The Refresh Loop ---
-import pytz
-from datetime import datetime
-
-# --- 6. The Refresh Loop ---
-# Set timezone to IST
-IST = pytz.timezone('Asia/Kolkata')
-current_time = datetime.now(IST).strftime('%H:%M:%S')
-
-st.caption(f"🔴 Live Polling Active... Last checked at {current_time} (IST)")
-time.sleep(15)
-st.rerun()
+    # --- 7. THE REFRESH LOOP ---
+    st.divider()
+    current_time = datetime.now(IST).strftime('%I:%M:%S %p')
+    st.caption(f"🔋 Power Saver Active: Refreshing every 2.5 mins | Last updated: {current_time} IST")
+    
+    # 150 seconds = 2.5 minutes
+    time.sleep(150)
+    st.rerun()
