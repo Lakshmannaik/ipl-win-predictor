@@ -87,17 +87,26 @@ def get_current_match_window():
     return "off_hours"
 
 # --- 4. CACHED MATCH ID FETCHER (4 Hours) ---
+# --- 4. CACHED MATCH ID FETCHER (UPDATED FOR REAL JSON) ---
 @st.cache_data(ttl=14400) 
 def get_active_ipl_match_id(window_type):
-    if window_type == "off_hours": return None
+    if window_type == "off_hours": 
+        return None
+        
     url = f"https://api.cricapi.com/v1/currentMatches?apikey={API_KEY}&offset=0"
     try:
         match_list = requests.get(url).json().get('data', [])
         for match in match_list:
-            name, series, status = match.get('name', '').lower(), match.get('series', '').lower(), match.get('status', '').lower()
-            if ("ipl" in name or "indian premier league" in series) and "match ended" not in status:
+            name = match.get('name', '').lower()
+            match_ended = match.get('matchEnded', False) # Uses the actual boolean from the API
+            
+            # If it's an IPL match and it has NOT ended
+            if ("ipl" in name or "indian premier league" in name) and not match_ended:
                 return match.get('id')
-    except: return None
+                
+    except: 
+        return None
+        
     return None
 
 # --- 5. DATA FETCHING LOGIC ---
