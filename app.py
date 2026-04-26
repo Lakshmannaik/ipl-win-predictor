@@ -128,7 +128,12 @@ else:
             crr = current_score / (balls_bowled / 6) if balls_bowled > 0 else 0
             rrr = (runs_required / balls_remaining) * 6 if balls_remaining > 0 else 0
             run_rate_diff = crr - rrr 
-
+            if crr > 9:
+                estimated_dots = int(balls_bowled * 0.30)
+            elif crr > 7:
+                estimated_dots = int(balls_bowled * 0.40)
+            else:
+                estimated_dots = int(balls_bowled * 0.50)
             # --- PREDICTION (Calculated before display) ---
             try:
                 model = joblib.load(MODEL_PATH)
@@ -139,7 +144,7 @@ else:
                     'venue': [clean_venue], 'season': ['2026'], 'is_impact_era': [1],
                     'target_score': [target_score], 'current_score': [current_score],
                     'runs_required': [runs_required], 'wickets_lost': [wickets_lost],
-                    'balls_remaining': [balls_remaining], 'cumulative_dots': [0],
+                    'balls_remaining': [balls_remaining], 'cumulative_dots': [estimated_dots],
                     'crr': [crr], 'rrr': [rrr], 'run_rate_diff': [run_rate_diff]
                 })
                 # Reorder and Cast
